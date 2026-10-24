@@ -1,4 +1,7 @@
-﻿import re
+import difflib
+import shutil
+import json
+import re
 import os
 import sys
 import json
@@ -155,6 +158,94 @@ def normalize_cmd(c):
     if isinstance(c, dict): c = c.get("command") or c.get("cmd") or str(c)
     return re.sub(r"^(?:powershell|pwsh)\s+(?:-Command\s+)?", "", str(c), flags=re.I).strip()
 
+
+
+# --- VIZOR ENHANCED MODULES ---
+UNDO_DIR = BASE_DIR / ".vizor_undo"
+UNDO_DIR.mkdir(exist_ok=True)
+
+def speak_async(phrase: str):
+    try:
+        cmd = f"(New-Object -ComObject SAPI.SpVoice).Speak('{phrase}')"
+        subprocess.Popen(["powershell", "-NoProfile", "-Command", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+def backup_files_for_undo(files_dict):
+    try:
+        manifest = {}
+        for fpath in files_dict.keys():
+            if fpath.exists():
+                b_name = fpath.name + ".bak"
+                shutil.copy2(fpath, UNDO_DIR / b_name)
+                manifest[str(fpath)] = str(UNDO_DIR / b_name)
+            else:
+                manifest[str(fpath)] = None
+        (UNDO_DIR / "last_undo.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+def perform_undo():
+    manifest_file = UNDO_DIR / "last_undo.json"
+    if not manifest_file.exists():
+        show_toast("VIZOR Undo", "Нет доступных действий для отката")
+        speak_async("Нет действий для отката")
+        return
+    try:
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        for orig_str, bak_str in manifest.items():
+            orig_path = Path(orig_str)
+            if bak_str is None:
+                if orig_path.exists():
+                    orig_path.unlink()
+            else:
+                bak_path = Path(bak_str)
+                if bak_path.exists():
+                    shutil.copy2(bak_path, orig_path)
+        manifest_file.unlink()
+        show_toast("VIZOR Undo", "Изменения успешно отменены!")
+        speak_async("Изменения отменены")
+    except Exception as e:
+        show_toast("VIZOR Undo Ошибка", str(e))
+
+def compute_diff_view(fpath: Path, new_content: str) -> str:
+    if not fpath.exists():
+        lines = new_content.splitlines()
+        return "\n".join(f"+ {line}" for line in lines[:80])
+    
+    old_content = fpath.read_text(encoding="utf-8", errors="replace")
+    old_lines = old_content.splitlines()
+    new_lines = new_content.splitlines()
+    
+    diff = list(difflib.unified_diff(old_lines, new_lines, fromfile=f"a/{fpath.name}", tofile=f"b/{fpath.name}", lineterm=""))
+    if not diff:
+        return "[Без изменений] Содержимое файла идентично"
+    return "\n".join(diff[:120])
+
+def capture_project_context():
+    try:
+        res = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Clipboard"], capture_output=True, text=True, encoding="utf-8")
+        cb_text = res.stdout.strip()
+        target = BASE_DIR / cb_text if cb_text else BASE_DIR
+        
+        prompt_parts = [f"# Контекст проекта: {BASE_DIR.name}"]
+        if target.is_file() and target.exists():
+            body = target.read_text(encoding="utf-8", errors="replace")
+            prompt_parts.append(f"## Файл: `{target.relative_to(BASE_DIR)}`\n```python\n{body}\n```")
+        else:
+            files_list = [str(x.relative_to(BASE_DIR)) for x in BASE_DIR.rglob("*") if x.is_file() and ".git" not in x.parts and ".venv" not in x.parts][:40]
+            items = "\n".join(f"- {f}" for f in files_list)
+            prompt_parts.append(f"## Структура проекта:\n{items}")
+            
+        prompt_parts.append("\nЗадача: ")
+        full_p = "\n\n".join(prompt_parts)
+        set_win_clipboard(full_p)
+        show_toast("VIZOR Context", "Контекст проекта скопирован в буфер!")
+        speak_async("Контекст скопирован")
+    except Exception as e:
+        show_toast("VIZOR Context Ошибка", str(e))
+# ------------------------------
+
 def set_win_clipboard(text_to_copy):
     try:
         subprocess.run(["clip.exe"], input=text_to_copy.encode("utf-16le"), check=True)
@@ -197,11 +288,13 @@ def exec_cmd(c_raw):
             raw_err = res.stderr.strip() or res.stdout.strip()
             prompt = make_error_prompt(cmd, raw_err)
             set_win_clipboard(prompt)
+            speak_async("Ошибка выполнения")
             show_toast("VIZOR Ошибка", "Промпт с ошибкой и кодом скопирован в буфер!")
     except Exception as e:
         show_toast("VIZOR Ошибка Runner", str(e))
 
 def apply_actions(files, commands):
+    backup_files_for_undo(files)
     app = []
     for it in files:
         rel = it["path"].lstrip("\\/").replace("/", os.sep)
@@ -360,6 +453,12 @@ def create_tray():
 
 if __name__ == "__main__":
     keyboard.add_hotkey('alt+v', process_clip)
+    try:
+        keyboard.add_hotkey('alt+z', perform_undo)
+        keyboard.add_hotkey('alt+c', capture_project_context)
+    except Exception:
+        pass
+
     keyboard.add_hotkey('alt+z', git_undo)
     print(f"[VIZOR HUD] Запущен. Проект: {BASE_DIR.name}")
     print(f"[VIZOR HUD] Alt+V: оверлей | Alt+Z: откат")
