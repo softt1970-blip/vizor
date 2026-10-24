@@ -1,55 +1,46 @@
 import re
 import os
 import json
+import subprocess
 import httpx
 import pyperclip
 import keyboard
 from pathlib import Path
+from windows_toasts import Toast, WindowsToaster
 
 BASE_DIR = Path(r"H:\VIZOR")
-# Проверяем стандартный порт Ollama и порт веб-панели 47474
 OLLAMA_ENDPOINTS = [
     "http://127.0.0.1:11434/api/generate",
     "http://127.0.0.1:47474/api/generate"
 ]
 MODEL_NAME = "qwen2.5-coder:7b"
+toaster = WindowsToaster("VIZOR Agent")
 
-def extract_code_blocks(text: str):
-    """Поиск блоков с явно указанными путями"""
-    pattern = r"```(?:[\w+-]+)?:?([^\n\r`]+)?\r?\n([\s\S]*?)```"
-    matches = re.findall(pattern, text)
-    extracted = []
-    
-    for path_hint, code in matches:
-        path_hint = path_hint.strip() if path_hint else ""
-        file_path = None
-        
-        if "/" in path_hint or "\\" in path_hint or "." in path_hint:
-            file_path = path_hint
-        else:
-            first_line = code.strip().split("\n")[0]
-            comment_match = re.match(r"^(?:#|//|--|REM|::)\s*(?:File|Path|Файл):\s*(.+)$", first_line, re.IGNORECASE)
-            if comment_match:
-                file_path = comment_match.group(1).strip()
-                code = "\n".join(code.strip().split("\n")[1:])
-        
-        if file_path:
-            extracted.append({"path": file_path, "content": code})
-    return extracted
+def show_toast(title: str, message: str):
+    try:
+        new_toast = Toast()
+        new_toast.text_fields = [title, message]
+        toaster.show_toast(new_toast)
+    except Exception as e:
+        print(f"[VIZOR Toast Error] {e}")
 
 def parse_with_local_llm(text: str):
-    """Обращение к qwen2.5-coder:7b для автоматического определения имени файла"""
-    print(f"\n[VIZOR] Прямой путь не найден. Анализ через {MODEL_NAME}...")
+    print(f"\n[VIZOR] Анализ через {MODEL_NAME}...")
     
-    prompt = f"""Ты — файловый диспетчер проекта VIZOR.
-Пользователь скопировал текст из чата ИИ. В нем содержится скрипт или код, но нет явного пути к файлу.
-Определи назначение кода и выбери логичный путь и имя файла (например: scripts/clean_registry.bat, src/utils.py, docker-compose.yml).
-Верни ответ СТРОГО в формате JSON без кавычек ```json и без лишних слов:
-[
-  {{"path": "путь/к_файлу.расширение", "content": "содержимое файла"}}
-]
+    prompt = f"""Ты — системный диспетчер проекта VIZOR.
+Пользователь скопировал текст из чата ИИ. Проанализируй его и выдели:
+1. Файлы для создания/обновления (относительные пути и их содержимое).
+2. Команды терминала для запуска (если есть инструкции запустить скрипт, docker, pip, npm и т.д.).
 
-Текст:
+Ответь СТРОГО валидным JSON-объектом без лишнего текста:
+{{
+  "files": [
+    {{"path": "scripts/clean_registry.bat", "content": "код файла"}}
+  ],
+  "commands": ["команда_1", "команда_2"]
+}}
+
+Текст для разбора:
 {text}
 """
     for endpoint in OLLAMA_ENDPOINTS:
@@ -63,18 +54,39 @@ def parse_with_local_llm(text: str):
                 })
                 if resp.status_code == 200:
                     raw_resp = resp.json()["response"].strip()
-                    data = json.loads(raw_resp)
-                    if isinstance(data, list) and len(data) > 0:
-                        return data
-                    elif isinstance(data, dict) and "path" in data:
-                        return [data]
+                    return json.loads(raw_resp)
         except Exception:
             continue
 
-    print("[VIZOR] Локальная модель не ответила по API. Сохраняю в резервный файл scripts/auto_saved.bat")
-    # Фолбэк, если API недоступен
-    clean_code = re.sub(r"^```[\w+-]*\r?\n|```$", "", text.strip())
-    return [{"path": "scripts/auto_saved.bat", "content": clean_code}]
+    # Фолбэк на сохранение как скрипт
+    return {
+        "files": [{"path": "scripts/auto_saved.bat", "content": text.strip()}],
+        "commands": []
+    }
+
+def execute_command(cmd: str):
+    print(f"\n[VIZOR Runner] Запуск команды: {cmd}")
+    try:
+        # Исполняем в окружении PowerShell 7 / Windows PowerShell
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            cwd=str(BASE_DIR),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace"
+        )
+        if result.stdout:
+            print("--- STDOUT ---")
+            print(result.stdout.strip())
+        if result.stderr:
+            print("--- STDERR ---")
+            print(result.stderr.strip())
+            
+        status = "Успешно" if result.returncode == 0 else f"Код ошибки {result.returncode}"
+        show_toast("VIZOR: Выполнение завершено", f"{cmd}\n{status}")
+    except Exception as e:
+        print(f"[VIZOR Runner Error] {e}")
 
 def process_clipboard():
     text = pyperclip.paste()
@@ -82,31 +94,39 @@ def process_clipboard():
         print("[VIZOR] Буфер обмена пуст.")
         return
 
-    # 1. Быстрый поиск пути по регулярке
-    blocks = extract_code_blocks(text)
-    
-    # 2. Если пути нет — отдаем в qwen2.5-coder:7b
-    if not blocks:
-        blocks = parse_with_local_llm(text)
+    data = parse_with_local_llm(text)
+    files = data.get("files", [])
+    commands = data.get("commands", [])
 
-    if not blocks:
-        print("[VIZOR] Не удалось распознать код.")
-        return
-
-    print(f"\n[VIZOR] Найдено файлов: {len(blocks)}")
-    for block in blocks:
-        rel_path = block["path"].lstrip("\\/").replace("/", os.sep)
+    created_files = []
+    for item in files:
+        rel_path = item["path"].lstrip("\\/").replace("/", os.sep)
         full_path = (BASE_DIR / rel_path).resolve()
-        
         full_path.parent.mkdir(parents=True, exist_ok=True)
         with open(full_path, "w", encoding="utf-8") as f:
-            f.write(block["content"].strip() + "\n")
-        print(f"  [+] Записан файл: {full_path}")
+            f.write(item["content"].strip() + "\n")
+        created_files.append(rel_path)
+        print(f"  [+] Записан: {rel_path}")
+
+    if created_files:
+        show_toast("VIZOR: Файлы сохранены", "\n".join(created_files[:3]))
+
+    # Обработка команд терминала
+    if commands:
+        print(f"\n[VIZOR] Обнаружены команды для выполнения: {commands}")
+        for cmd in commands:
+            # Запрос подтверждения безопасности
+            print(f"\nВыполнить команду в {BASE_DIR}?")
+            print(f">> {cmd}")
+            choice = input("Запустить? [Y/n]: ").strip().lower()
+            if choice in ["y", "yes", "д", "да", ""]:
+                execute_command(cmd)
+            else:
+                print("Команда пропущена.")
 
 print("==================================================")
-print(f" VIZOR Watcher активен (Модель: {MODEL_NAME})")
-print(" 1. Скопируйте блок из DeepSeek / браузера (Ctrl + C)")
-print(" 2. Нажмите Alt + V на клавиатуре")
+print(f" VIZOR Engine + Safe Runner активен ({MODEL_NAME})")
+print(" Скопируйте текст из чата и нажмите Alt + V")
 print("==================================================")
 
 keyboard.add_hotkey('alt+v', process_clipboard)
