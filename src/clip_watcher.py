@@ -1,4 +1,4 @@
-import re
+﻿import re
 import os
 import sys
 import json
@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import threading
 import tkinter as tk
+from tkinter import filedialog
 from pathlib import Path
 from datetime import datetime
 
@@ -29,18 +30,13 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT_DIR / "config.json"
 OLLAMA_ENDPOINTS = [
     "http://127.0.0.1:11434/api/generate",
-    "http://127.0.0.1:47474/api/generate",
+    "http://127.0.0.1:47474/api/generate"
 ]
 toaster = WindowsToaster("VIZOR Agent")
 tray_icon_ref = None
 
-
 def load_config():
-    cfg = {
-        "active_project": str(ROOT_DIR),
-        "recent_projects": [str(ROOT_DIR)],
-        "model_name": "qwen2.5-coder:7b",
-    }
+    cfg = {"active_project": str(ROOT_DIR), "recent_projects": [str(ROOT_DIR)], "model_name": "qwen2.5-coder:7b"}
     if CONFIG_PATH.exists():
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -49,7 +45,6 @@ def load_config():
             pass
     return cfg
 
-
 def save_config(cfg):
     try:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -57,11 +52,9 @@ def save_config(cfg):
     except Exception:
         pass
 
-
 config = load_config()
 BASE_DIR = Path(config.get("active_project", str(ROOT_DIR)))
 MODEL_NAME = config.get("model_name", "qwen2.5-coder:7b")
-
 
 def show_toast(title, msg):
     try:
@@ -71,13 +64,11 @@ def show_toast(title, msg):
     except Exception:
         pass
 
-
 def open_in_vscode():
     try:
         subprocess.Popen(["code", str(BASE_DIR)], shell=True)
     except Exception:
         pass
-
 
 def set_active_project(new_path):
     global BASE_DIR, config
@@ -89,18 +80,22 @@ def set_active_project(new_path):
         config["recent_projects"] = [str(p)] + rec[:4]
         save_config(config)
         show_toast("VIZOR: Проект", BASE_DIR.name)
+        if tray_icon_ref:
+            tray_icon_ref.menu = build_menu()
 
+def pick_folder_dialog():
+    def _open():
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        selected = filedialog.askdirectory(title="Выберите директорию проекта для VIZOR", initialdir=str(BASE_DIR))
+        root.destroy()
+        if selected:
+            set_active_project(selected)
+    threading.Thread(target=_open, daemon=True).start()
 
 def get_project_files():
-    ignored = {
-        ".git",
-        ".venv",
-        ".vizor_history",
-        "node_modules",
-        "__pycache__",
-        ".idea",
-        ".vscode",
-    }
+    ignored = {".git", ".venv", ".vizor_history", "node_modules", "__pycache__", ".idea", ".vscode"}
     fl = []
     for root, dirs, files in os.walk(BASE_DIR):
         dirs[:] = [d for d in dirs if d not in ignored]
@@ -108,39 +103,20 @@ def get_project_files():
             fl.append(str((Path(root) / f).relative_to(BASE_DIR)).replace("\\", "/"))
     return fl
 
-
 def git_commit_changes(names):
-    if not (BASE_DIR / ".git").exists():
-        return
+    if not (BASE_DIR / ".git").exists(): return
     try:
-        subprocess.run(
-            ["git", "add", "."], cwd=str(BASE_DIR), capture_output=True, check=True
-        )
-        subprocess.run(
-            ["git", "commit", "-m", f"vizor(auto): updated {', '.join(names[:2])}"],
-            cwd=str(BASE_DIR),
-            capture_output=True,
-            check=True,
-        )
+        subprocess.run(["git", "add", "."], cwd=str(BASE_DIR), capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", f"vizor(auto): updated {', '.join(names[:2])}"], cwd=str(BASE_DIR), capture_output=True, check=True)
     except Exception:
         pass
 
-
 def git_undo():
-    if not (BASE_DIR / ".git").exists():
-        return
+    if not (BASE_DIR / ".git").exists(): return
     try:
-        log = subprocess.run(
-            ["git", "log", "-1", "--pretty=%B"],
-            cwd=str(BASE_DIR),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        ).stdout.strip()
+        log = subprocess.run(["git", "log", "-1", "--pretty=%B"], cwd=str(BASE_DIR), capture_output=True, text=True, encoding="utf-8").stdout.strip()
         if log.startswith("vizor(auto):"):
-            subprocess.run(
-                ["git", "reset", "--hard", "HEAD~1"], cwd=str(BASE_DIR), check=True
-            )
+            subprocess.run(["git", "reset", "--hard", "HEAD~1"], cwd=str(BASE_DIR), check=True)
             show_toast("VIZOR Откат", "Коммит отменен")
         else:
             subprocess.run(["git", "restore", "."], cwd=str(BASE_DIR), check=True)
@@ -149,7 +125,6 @@ def git_undo():
     except Exception as e:
         show_toast("VIZOR Ошибка отката", str(e))
 
-
 def parse_with_local_llm(text, files):
     f_str = "\n".join(files) if files else "Пусто"
     prompt = f"""Ты — системный диспетчер VIZOR.
@@ -157,7 +132,7 @@ def parse_with_local_llm(text, files):
 {f_str}
 
 Инструкции:
-1. Если файл новый — обязательно создай его и укажи путь в path (например: src/calc_demo.py). Не отказывай в создании!
+1. Если файл новый — обязательно создай его и укажи путь в path (например: app.py). Не отказывай в создании!
 2. В content передавай чистый код без markdown.
 3. В commands передавай терминальные команды запуска (если есть).
 
@@ -169,52 +144,28 @@ JSON:
     for ep in OLLAMA_ENDPOINTS:
         try:
             with httpx.Client(timeout=40.0) as client:
-                r = client.post(
-                    ep,
-                    json={
-                        "model": MODEL_NAME,
-                        "prompt": prompt,
-                        "stream": False,
-                        "format": "json",
-                    },
-                )
+                r = client.post(ep, json={"model": MODEL_NAME, "prompt": prompt, "stream": False, "format": "json"})
                 if r.status_code == 200:
                     return json.loads(r.json()["response"].strip())
         except Exception:
             continue
     return {"files": [], "commands": []}
 
-
 def normalize_cmd(c):
-    if isinstance(c, dict):
-        c = c.get("command") or c.get("cmd") or str(c)
-    return re.sub(
-        r"^(?:powershell|pwsh)\s+(?:-Command\s+)?", "", str(c), flags=re.I
-    ).strip()
-
+    if isinstance(c, dict): c = c.get("command") or c.get("cmd") or str(c)
+    return re.sub(r"^(?:powershell|pwsh)\s+(?:-Command\s+)?", "", str(c), flags=re.I).strip()
 
 def exec_cmd(c_raw):
     cmd = normalize_cmd(c_raw)
-    if not cmd:
-        return
+    if not cmd: return
     show_toast("VIZOR Runner", cmd)
     try:
-        res = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", cmd],
-            cwd=str(BASE_DIR),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        res = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], cwd=str(BASE_DIR), capture_output=True, text=True, encoding="utf-8", errors="replace")
         if res.returncode != 0 or res.stderr.strip():
-            pyperclip.copy(
-                f"Ошибка в `{cmd}`:\n```\n{res.stderr.strip() or res.stdout.strip()}\n```"
-            )
+            pyperclip.copy(f"Ошибка в `{cmd}`:\n```\n{res.stderr.strip() or res.stdout.strip()}\n```")
             show_toast("VIZOR Ошибка", "Текст ошибки в буфере")
     except Exception as e:
         show_toast("VIZOR Ошибка Runner", str(e))
-
 
 def apply_actions(files, commands):
     app = []
@@ -228,9 +179,7 @@ def apply_actions(files, commands):
     if app:
         git_commit_changes(app)
         show_toast(f"VIZOR [{BASE_DIR.name}]", "\n".join(app[:3]))
-    for c in commands:
-        exec_cmd(c)
-
+    for c in commands: exec_cmd(c)
 
 def show_preview_overlay(files, commands):
     root = tk.Tk()
@@ -240,208 +189,75 @@ def show_preview_overlay(files, commands):
     root.overrideredirect(True)
     root.configure(bg="#2d2d2d")
 
-    # Внешняя граница окна
-    main_frame = tk.Frame(
-        root, bg="#1e1e1e", bd=1, highlightbackground="#007acc", highlightthickness=1
-    )
+    main_frame = tk.Frame(root, bg="#1e1e1e", bd=1, highlightbackground="#007acc", highlightthickness=1)
     main_frame.pack(fill="both", expand=True)
 
-    # Кастомная темная шапка с возможностью перетаскивания
     title_bar = tk.Frame(main_frame, bg="#252526", padx=12, pady=8)
     title_bar.pack(fill="x")
 
-    def start_move(e):
-        root.x = e.x
-        root.y = e.y
-
-    def do_move(e):
-        root.geometry(
-            f"+{root.winfo_pointerx() - root.x}+{root.winfo_pointery() - root.y}"
-        )
-
+    def start_move(e): root.x = e.x; root.y = e.y
+    def do_move(e): root.geometry(f"+{root.winfo_pointerx() - root.x}+{root.winfo_pointery() - root.y}")
     title_bar.bind("<Button-1>", start_move)
     title_bar.bind("<B1-Motion>", do_move)
 
-    badge = tk.Label(
-        title_bar,
-        text="⚡ VIZOR HUD",
-        font=("Segoe UI", 9, "bold"),
-        fg="#00e676",
-        bg="#1b1b1b",
-        padx=6,
-        pady=2,
-    )
+    badge = tk.Label(title_bar, text="⚡ VIZOR HUD", font=("Segoe UI", 9, "bold"), fg="#00e676", bg="#1b1b1b", padx=6, pady=2)
     badge.pack(side="left", padx=(0, 10))
 
-    t_lbl = tk.Label(
-        title_bar,
-        text=f"Проект: {BASE_DIR.name}  ({BASE_DIR})",
-        font=("Segoe UI", 9),
-        fg="#cccccc",
-        bg="#252526",
-    )
+    t_lbl = tk.Label(title_bar, text=f"Проект: {BASE_DIR.name}  ({BASE_DIR})", font=("Segoe UI", 9), fg="#cccccc", bg="#252526")
     t_lbl.pack(side="left")
     t_lbl.bind("<Button-1>", start_move)
     t_lbl.bind("<B1-Motion>", do_move)
 
-    btn_x = tk.Label(
-        title_bar,
-        text="✕",
-        font=("Segoe UI", 10, "bold"),
-        fg="#888888",
-        bg="#252526",
-        padx=8,
-        cursor="hand2",
-    )
+    btn_x = tk.Label(title_bar, text="✕", font=("Segoe UI", 10, "bold"), fg="#888888", bg="#252526", padx=8, cursor="hand2")
     btn_x.pack(side="right")
     btn_x.bind("<Button-1>", lambda e: root.destroy())
 
-    # Панель метаданных
     meta_box = tk.Frame(main_frame, bg="#181818", padx=16, pady=10)
     meta_box.pack(fill="x", padx=12, pady=(10, 4))
 
     files_summary = ", ".join([f["path"] for f in files]) if files else "нет"
-    cmds_summary = (
-        " && ".join([normalize_cmd(c) for c in commands]) if commands else "нет"
-    )
+    cmds_summary = " && ".join([normalize_cmd(c) for c in commands]) if commands else "нет"
 
     f_row = tk.Frame(meta_box, bg="#181818")
     f_row.pack(fill="x", pady=2)
-    tk.Label(
-        f_row,
-        text="ФАЙЛЫ:",
-        font=("Segoe UI", 8, "bold"),
-        fg="#777777",
-        bg="#181818",
-        width=10,
-        anchor="w",
-    ).pack(side="left")
-    tk.Label(
-        f_row,
-        text=files_summary,
-        font=("Consolas", 10, "bold"),
-        fg="#4ec9b0",
-        bg="#181818",
-        anchor="w",
-    ).pack(side="left")
+    tk.Label(f_row, text="ФАЙЛЫ:", font=("Segoe UI", 8, "bold"), fg="#777777", bg="#181818", width=10, anchor="w").pack(side="left")
+    tk.Label(f_row, text=files_summary, font=("Consolas", 10, "bold"), fg="#4ec9b0", bg="#181818", anchor="w").pack(side="left")
 
     c_row = tk.Frame(meta_box, bg="#181818")
     c_row.pack(fill="x", pady=2)
-    tk.Label(
-        c_row,
-        text="RUNNER:",
-        font=("Segoe UI", 8, "bold"),
-        fg="#777777",
-        bg="#181818",
-        width=10,
-        anchor="w",
-    ).pack(side="left")
-    tk.Label(
-        c_row,
-        text=cmds_summary,
-        font=("Consolas", 9),
-        fg="#ce9178",
-        bg="#181818",
-        anchor="w",
-    ).pack(side="left")
+    tk.Label(c_row, text="RUNNER:", font=("Segoe UI", 8, "bold"), fg="#777777", bg="#181818", width=10, anchor="w").pack(side="left")
+    tk.Label(c_row, text=cmds_summary, font=("Consolas", 9), fg="#ce9178", bg="#181818", anchor="w").pack(side="left")
 
-    # Нижняя панель действий
     bottom_bar = tk.Frame(main_frame, bg="#252526", padx=16, pady=10)
     bottom_bar.pack(side="bottom", fill="x")
 
-    def confirm(e=None):
-        root.destroy()
-        apply_actions(files, commands)
-
-    def cancel(e=None):
-        root.destroy()
-
+    def confirm(e=None): root.destroy(); apply_actions(files, commands)
+    def cancel(e=None): root.destroy()
     root.bind("<Return>", confirm)
     root.bind("<Escape>", cancel)
 
-    tk.Button(
-        bottom_bar,
-        text="Отмена (Esc)",
-        font=("Segoe UI", 9),
-        bg="#333333",
-        fg="#dddddd",
-        relief="flat",
-        padx=16,
-        pady=6,
-        cursor="hand2",
-        command=cancel,
-    ).pack(side="right", padx=6)
-    tk.Button(
-        bottom_bar,
-        text="✔ Применить (Enter)",
-        font=("Segoe UI", 9, "bold"),
-        bg="#007acc",
-        fg="#ffffff",
-        relief="flat",
-        padx=20,
-        pady=6,
-        cursor="hand2",
-        command=confirm,
-    ).pack(side="right", padx=6)
+    tk.Button(bottom_bar, text="Отмена (Esc)", font=("Segoe UI", 9), bg="#333333", fg="#dddddd", relief="flat", padx=16, pady=6, cursor="hand2", command=cancel).pack(side="right", padx=6)
+    tk.Button(bottom_bar, text="✔ Применить (Enter)", font=("Segoe UI", 9, "bold"), bg="#007acc", fg="#ffffff", relief="flat", padx=20, pady=6, cursor="hand2", command=confirm).pack(side="right", padx=6)
 
-    # Редактор предпросмотра
     editor_container = tk.Frame(main_frame, bg="#181818", padx=12, pady=6)
     editor_container.pack(side="top", fill="both", expand=True, padx=12, pady=6)
 
-    line_nums = tk.Text(
-        editor_container,
-        width=4,
-        bg="#181818",
-        fg="#555555",
-        font=("Cascadia Code", 10),
-        relief="flat",
-        wrap="none",
-        state="disabled",
-        padx=4,
-        pady=4,
-    )
+    line_nums = tk.Text(editor_container, width=4, bg="#181818", fg="#555555", font=("Cascadia Code", 10), relief="flat", wrap="none", state="disabled", padx=4, pady=4)
     line_nums.pack(side="left", fill="y")
 
-    preview_text = tk.Text(
-        editor_container,
-        bg="#181818",
-        fg="#d4d4d4",
-        insertbackground="#ffffff",
-        font=("Cascadia Code", 10),
-        relief="flat",
-        wrap="none",
-        padx=8,
-        pady=4,
-    )
+    preview_text = tk.Text(editor_container, bg="#181818", fg="#d4d4d4", insertbackground="#ffffff", font=("Cascadia Code", 10), relief="flat", wrap="none", padx=8, pady=4)
     preview_text.tag_configure("kw", foreground="#569cd6")
     preview_text.tag_configure("string", foreground="#ce9178")
     preview_text.pack(side="left", fill="both", expand=True)
 
-    raw_code = (
-        files[0].get("content", "")
-        if files
-        else ("# Команды:\n" + "\n".join([normalize_cmd(c) for c in commands]))
-    )
+    raw_code = files[0].get("content", "") if files else ("# Команды:\n" + "\n".join([normalize_cmd(c) for c in commands]))
     preview_text.insert("1.0", raw_code)
 
-    for kw in [
-        "def ",
-        "class ",
-        "import ",
-        "from ",
-        "return ",
-        "if ",
-        "else:",
-        "for ",
-        "while ",
-        "try:",
-        "except ",
-    ]:
+    for kw in ["def ", "class ", "import ", "from ", "return ", "if ", "else:", "for ", "while ", "try:", "except "]:
         pos = "1.0"
         while True:
             pos = preview_text.search(kw, pos, stopindex=tk.END)
-            if not pos:
-                break
+            if not pos: break
             end = f"{pos}+{len(kw)}c"
             preview_text.tag_add("kw", pos, end)
             pos = end
@@ -461,56 +277,56 @@ def show_preview_overlay(files, commands):
     line_nums.bind("<MouseWheel>", on_mousewheel)
 
     root.update_idletasks()
-    root.geometry(
-        f"840x580+{(root.winfo_screenwidth() - 840)//2}+{(root.winfo_screenheight() - 580)//2}"
-    )
+    root.geometry(f"840x580+{(root.winfo_screenwidth() - 840)//2}+{(root.winfo_screenheight() - 580)//2}")
     root.mainloop()
-
 
 def process_clip():
     txt = pyperclip.paste()
-    if not txt.strip():
-        return
+    if not txt.strip(): return
     data = parse_with_local_llm(txt, get_project_files())
     files = data.get("files", [])
     commands = data.get("commands", [])
     if files or commands:
-        threading.Thread(
-            target=show_preview_overlay, args=(files, commands), daemon=True
-        ).start()
-
+        threading.Thread(target=show_preview_overlay, args=(files, commands), daemon=True).start()
 
 def build_menu():
-    rec = [
-        pystray.MenuItem(f"{Path(r).name}", lambda _, p=r: set_active_project(p))
-        for r in config.get("recent_projects", [])
-    ]
-    m = [
+    recents = config.get("recent_projects", [])
+    recent_items = []
+    for r in recents:
+        p_name = Path(r).name or r
+        recent_items.append(
+            pystray.MenuItem(f"{p_name} ({r})", lambda _, item_path=r: set_active_project(item_path))
+        )
+
+    menu_structure = [
         pystray.MenuItem(f"Проект: {BASE_DIR.name}", lambda: None, enabled=False),
         pystray.MenuItem("Открыть в VS Code", lambda: open_in_vscode()),
+        pystray.MenuItem("Выбрать папку проекта...", lambda: pick_folder_dialog()),
+    ]
+    if recent_items:
+        menu_structure.append(pystray.MenuItem("Недавние проекты", pystray.Menu(*recent_items)))
+
+    menu_structure.extend([
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Обработать буфер (Alt+V)", lambda: process_clip()),
         pystray.MenuItem("Откатить действие (Alt+Z)", lambda: git_undo()),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Выход", lambda icon, item: (icon.stop(), os._exit(0))),
-    ]
-    return pystray.Menu(*m)
-
+        pystray.MenuItem("Выход", lambda icon, item: (icon.stop(), os._exit(0)))
+    ])
+    return pystray.Menu(*menu_structure)
 
 def create_tray():
     global tray_icon_ref
-    img = Image.new("RGB", (64, 64), (25, 25, 25))
+    img = Image.new('RGB', (64, 64), (25, 25, 25))
     d = ImageDraw.Draw(img)
     d.rectangle([16, 16, 48, 48], fill=(0, 200, 100))
     d.polygon([(32, 20), (20, 44), (44, 44)], fill=(255, 255, 255))
     tray_icon_ref = pystray.Icon("VIZOR", img, "VIZOR HUD", build_menu())
     return tray_icon_ref
 
-
 if __name__ == "__main__":
-    keyboard.add_hotkey("alt+v", process_clip)
-    keyboard.add_hotkey("alt+z", git_undo)
+    keyboard.add_hotkey('alt+v', process_clip)
+    keyboard.add_hotkey('alt+z', git_undo)
     print(f"[VIZOR HUD] Запущен. Проект: {BASE_DIR.name}")
     print(f"[VIZOR HUD] Alt+V: оверлей | Alt+Z: откат")
     create_tray().run()
-
