@@ -25,7 +25,8 @@ from PIL import Image, ImageDraw
 import pystray
 from windows_toasts import Toast, WindowsToaster
 
-CONFIG_PATH = Path(r"H:\VIZOR\config.json")
+ROOT_DIR = Path(__file__).resolve().parent.parent
+CONFIG_PATH = ROOT_DIR / "config.json"
 OLLAMA_ENDPOINTS = [
     "http://127.0.0.1:11434/api/generate",
     "http://127.0.0.1:47474/api/generate",
@@ -36,8 +37,8 @@ tray_icon_ref = None
 
 def load_config():
     cfg = {
-        "active_project": r"H:\VIZOR",
-        "recent_projects": [r"H:\VIZOR"],
+        "active_project": str(ROOT_DIR),
+        "recent_projects": [str(ROOT_DIR)],
         "model_name": "qwen2.5-coder:7b",
     }
     if CONFIG_PATH.exists():
@@ -58,7 +59,7 @@ def save_config(cfg):
 
 
 config = load_config()
-BASE_DIR = Path(config.get("active_project", r"H:\VIZOR"))
+BASE_DIR = Path(config.get("active_project", str(ROOT_DIR)))
 MODEL_NAME = config.get("model_name", "qwen2.5-coder:7b")
 
 
@@ -512,3 +513,4 @@ if __name__ == "__main__":
     print(f"[VIZOR HUD] Запущен. Проект: {BASE_DIR.name}")
     print(f"[VIZOR HUD] Alt+V: оверлей | Alt+Z: откат")
     create_tray().run()
+

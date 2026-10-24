@@ -1,24 +1,8 @@
-# Секретные данные
-.env
-.env.local
-*.key
-*.pem
-
-# Окружение и зависимости
-node_modules/
+.venv/
 __pycache__/
 *.pyc
-venv/
-.venv/
-dist/
-build/
-*.exe
-
-# Логи и временные файлы
-*.log
-tmp/
-temp/
-.vscode/*
-!.vscode/settings.json
-
 .vizor_history/
+config.json
+*.bak
+.idea/
+.vscode/
