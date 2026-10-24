@@ -155,6 +155,38 @@ def normalize_cmd(c):
     if isinstance(c, dict): c = c.get("command") or c.get("cmd") or str(c)
     return re.sub(r"^(?:powershell|pwsh)\s+(?:-Command\s+)?", "", str(c), flags=re.I).strip()
 
+def set_win_clipboard(text_to_copy):
+    try:
+        subprocess.run(["clip.exe"], input=text_to_copy.encode("utf-16le"), check=True)
+        return True
+    except Exception:
+        return False
+
+def make_error_prompt(cmd, error_text):
+    target_file = None
+    for part in cmd.split():
+        clean = part.strip("'")
+        if clean.endswith(('.py', '.js', '.ts', '.go', '.sh', '.bat')):
+            fpath = BASE_DIR / clean
+            if fpath.exists():
+                target_file = fpath
+                break
+
+    file_context = ""
+    if target_file and target_file.exists():
+        try:
+            body = target_file.read_text(encoding="utf-8", errors="replace")
+            file_context = f"\n\nКод файла `{target_file.name}`:\n```python\n{body}\n```"
+        except Exception:
+            pass
+
+    return (
+        f"При выполнении команды `{cmd}` в проекте `{BASE_DIR.name}` возникла ошибка:\n\n"
+        f"```stderr\n{error_text.strip()}\n```"
+        f"{file_context}\n\n"
+        f"Исправь ошибку и выдай обновленный код файла с указанием имени файла в формате `# File: <путь>`."
+    )
+
 def exec_cmd(c_raw):
     cmd = normalize_cmd(c_raw)
     if not cmd: return
@@ -162,8 +194,10 @@ def exec_cmd(c_raw):
     try:
         res = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], cwd=str(BASE_DIR), capture_output=True, text=True, encoding="utf-8", errors="replace")
         if res.returncode != 0 or res.stderr.strip():
-            pyperclip.copy(f"Ошибка в `{cmd}`:\n```\n{res.stderr.strip() or res.stdout.strip()}\n```")
-            show_toast("VIZOR Ошибка", "Текст ошибки в буфере")
+            raw_err = res.stderr.strip() or res.stdout.strip()
+            prompt = make_error_prompt(cmd, raw_err)
+            set_win_clipboard(prompt)
+            show_toast("VIZOR Ошибка", "Промпт с ошибкой и кодом скопирован в буфер!")
     except Exception as e:
         show_toast("VIZOR Ошибка Runner", str(e))
 
