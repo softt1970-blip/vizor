@@ -1,0 +1,7 @@
+.git
+.clinerules
+node_modules
+__pycache__
+.env
+docs
+*.md
