@@ -1,19 +1,16 @@
 @echo off
-chcp 65001 >nul
 echo ==================================================
-echo [VIZOR] Завершение сессии...
+echo [VIZOR] Stopping environment...
 echo ==================================================
 
-:: 1. Выгрузка VIZOR из трея
 taskkill /F /IM pythonw.exe 2>nul
-echo [+] Агент VIZOR остановлен.
+echo [+] VIZOR Agent stopped.
 
-:: 2. Выгрузка Ollama и освобождение видеопамяти
 taskkill /F /IM ollama.exe 2>nul
 taskkill /F /IM ollama_app.exe 2>nul
-echo [+] Ollama остановлена, память GPU освобождена.
+echo [+] Ollama stopped, GPU VRAM freed.
 
 echo ==================================================
-echo [✓] Сессия завершена.
+echo [OK] Session finished.
 echo ==================================================
 timeout /t 2 >nul
