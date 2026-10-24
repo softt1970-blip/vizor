@@ -1,14 +1,22 @@
-﻿import re
+import re
 import os
 import sys
 import json
+import socket
 import shutil
 import subprocess
 import threading
 import tkinter as tk
-from tkinter import filedialog
 from pathlib import Path
 from datetime import datetime
+
+# Одиночный экземпляр
+try:
+    _lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    _lock.bind(("127.0.0.1", 49222))
+except OSError:
+    print("[!] Экземпляр VIZOR уже запущен.")
+    sys.exit(0)
 
 import httpx
 import pyperclip
@@ -20,16 +28,17 @@ from windows_toasts import Toast, WindowsToaster
 CONFIG_PATH = Path(r"H:\VIZOR\config.json")
 OLLAMA_ENDPOINTS = [
     "http://127.0.0.1:11434/api/generate",
-    "http://127.0.0.1:47474/api/generate"
+    "http://127.0.0.1:47474/api/generate",
 ]
 toaster = WindowsToaster("VIZOR Agent")
 tray_icon_ref = None
 
+
 def load_config():
-    default_cfg = {
+    cfg = {
         "active_project": r"H:\VIZOR",
         "recent_projects": [r"H:\VIZOR"],
-        "model_name": "qwen2.5-coder:7b"
+        "model_name": "qwen2.5-coder:7b",
     }
     if CONFIG_PATH.exists():
         try:
@@ -37,267 +46,469 @@ def load_config():
                 return json.load(f)
         except Exception:
             pass
-    return default_cfg
+    return cfg
+
 
 def save_config(cfg):
     try:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"[Config Save Error] {e}")
+    except Exception:
+        pass
+
 
 config = load_config()
 BASE_DIR = Path(config.get("active_project", r"H:\VIZOR"))
 MODEL_NAME = config.get("model_name", "qwen2.5-coder:7b")
 
-def get_backup_dir():
-    return BASE_DIR / ".vizor_history"
 
-def show_toast(title: str, message: str):
+def show_toast(title, msg):
     try:
-        new_toast = Toast()
-        new_toast.text_fields = [str(title), str(message)]
-        toaster.show_toast(new_toast)
-    except Exception as e:
-        print(f"[Toast Error] {e}")
+        t = Toast()
+        t.text_fields = [str(title), str(msg)]
+        toaster.show_toast(t)
+    except Exception:
+        pass
 
-def set_active_project(new_path: str):
+
+def open_in_vscode():
+    try:
+        subprocess.Popen(["code", str(BASE_DIR)], shell=True)
+    except Exception:
+        pass
+
+
+def set_active_project(new_path):
     global BASE_DIR, config
     p = Path(new_path).resolve()
-    if not p.exists() or not p.is_dir():
-        show_toast("VIZOR Ошибка", f"Папка не существует:\n{new_path}")
-        return
+    if p.exists() and p.is_dir():
+        BASE_DIR = p
+        config["active_project"] = str(p)
+        rec = [x for x in config.get("recent_projects", []) if x != str(p)]
+        config["recent_projects"] = [str(p)] + rec[:4]
+        save_config(config)
+        show_toast("VIZOR: Проект", BASE_DIR.name)
 
-    BASE_DIR = p
-    config["active_project"] = str(p)
-    recents = config.get("recent_projects", [])
-    if str(p) in recents:
-        recents.remove(str(p))
-    recents.insert(0, str(p))
-    config["recent_projects"] = recents[:5]
-    save_config(config)
-
-    show_toast("VIZOR: Проект переключен", f"Активная папка:\n{BASE_DIR.name}\n({BASE_DIR})")
-    if tray_icon_ref:
-        tray_icon_ref.menu = build_menu()
-
-def pick_folder_dialog():
-    def _open():
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        selected = filedialog.askdirectory(title="Выберите директорию проекта для VIZOR", initialdir=str(BASE_DIR))
-        root.destroy()
-        if selected:
-            set_active_project(selected)
-    threading.Thread(target=_open, daemon=True).start()
 
 def get_project_files():
-    ignored = {".git", ".venv", ".vizor_history", "node_modules", "__pycache__", ".idea", ".vscode"}
-    file_list = []
+    ignored = {
+        ".git",
+        ".venv",
+        ".vizor_history",
+        "node_modules",
+        "__pycache__",
+        ".idea",
+        ".vscode",
+    }
+    fl = []
     for root, dirs, files in os.walk(BASE_DIR):
         dirs[:] = [d for d in dirs if d not in ignored]
         for f in files:
-            full = Path(root) / f
-            rel = full.relative_to(BASE_DIR)
-            file_list.append(str(rel).replace("\\", "/"))
-    return file_list
+            fl.append(str((Path(root) / f).relative_to(BASE_DIR)).replace("\\", "/"))
+    return fl
 
-def backup_file(file_path: Path):
-    if file_path.exists():
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        rel = file_path.relative_to(BASE_DIR)
-        dest = get_backup_dir() / f"{rel}.{timestamp}.bak"
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(file_path, dest)
 
-def git_commit_changes(file_names: list):
-    git_dir = BASE_DIR / ".git"
-    if not git_dir.exists():
+def git_commit_changes(names):
+    if not (BASE_DIR / ".git").exists():
         return
     try:
-        files_str = ", ".join(file_names[:2])
-        if len(file_names) > 2:
-            files_str += f" (+{len(file_names) - 2})"
-        commit_msg = f"vizor(auto): updated {files_str}"
-        subprocess.run(["git", "add", "."], cwd=str(BASE_DIR), capture_output=True, check=True)
-        subprocess.run(["git", "commit", "-m", commit_msg], cwd=str(BASE_DIR), capture_output=True, check=True)
-    except Exception as e:
-        print(f"[Git Commit Error] {e}")
-
-def git_undo_last_action():
-    git_dir = BASE_DIR / ".git"
-    if not git_dir.exists():
-        show_toast("VIZOR: Откат", "В текущей папке проекта нет репозитория Git.")
-        return
-    try:
-        log_res = subprocess.run(
-            ["git", "log", "-1", "--pretty=%B"],
-            cwd=str(BASE_DIR), capture_output=True, text=True, encoding="utf-8"
+        subprocess.run(
+            ["git", "add", "."], cwd=str(BASE_DIR), capture_output=True, check=True
         )
-        last_msg = log_res.stdout.strip()
-        if last_msg.startswith("vizor(auto):"):
-            subprocess.run(["git", "reset", "--hard", "HEAD~1"], cwd=str(BASE_DIR), check=True)
-            show_toast("VIZOR: Откат выполнен", f"Отменен коммит:\n{last_msg}")
-        else:
-            subprocess.run(["git", "restore", "."], cwd=str(BASE_DIR), check=True)
-            subprocess.run(["git", "clean", "-fd"], cwd=str(BASE_DIR), check=True)
-            show_toast("VIZOR: Откат выполнен", "Файлы возвращены к последнему ручному коммиту.")
-    except Exception as e:
-        show_toast("VIZOR: Ошибка отката", str(e))
+        subprocess.run(
+            ["git", "commit", "-m", f"vizor(auto): updated {', '.join(names[:2])}"],
+            cwd=str(BASE_DIR),
+            capture_output=True,
+            check=True,
+        )
+    except Exception:
+        pass
 
-def parse_with_local_llm(text: str, existing_files: list):
-    files_str = "\n".join(existing_files) if existing_files else "Проект пуст"
-    prompt = f"""Ты — файловый диспетчер проекта VIZOR.
-Пользователь скопировал текст из чата ИИ с кодом или инструкцией.
-Сопоставь код с существующими файлами проекта или укажи правильный путь.
 
-СПИСОК СУЩЕСТВУЮЩИХ ФАЙЛОВ В ПРОЕКТЕ ({BASE_DIR.name}):
-{files_str}
-
-ПРАВИЛА:
-1. Если код обновляет существующий файл — верни СТРОГО путь этого файла из списка.
-2. Если файла еще нет — выбери подходящий относительный путь.
-3. Команды для выполнения верни строгим списком чистых команд без вызова powershell.
-
-Ответь СТРОГО валидным JSON без markdown:
-{{
-  "files": [
-    {{"path": "путь/к_файлу.ext", "content": "код"}}
-  ],
-  "commands": []
-}}
-
-Текст:
-{text}
-"""
-    for endpoint in OLLAMA_ENDPOINTS:
-        try:
-            with httpx.Client(timeout=40.0) as client:
-                resp = client.post(endpoint, json={
-                    "model": MODEL_NAME,
-                    "prompt": prompt,
-                    "stream": False,
-                    "format": "json"
-                })
-                if resp.status_code == 200:
-                    raw = resp.json()["response"].strip()
-                    return json.loads(raw)
-        except Exception:
-            continue
-    return {"files": [], "commands": []}
-
-def normalize_command(cmd_raw) -> str:
-    if isinstance(cmd_raw, dict):
-        cmd = cmd_raw.get("command") or cmd_raw.get("cmd") or str(cmd_raw)
-    else:
-        cmd = str(cmd_raw).strip()
-    return re.sub(r"^(?:powershell|pwsh)\s+(?:-Command\s+)?", "", cmd, flags=re.IGNORECASE).strip()
-
-def execute_command_with_feedback(cmd_raw):
-    cmd = normalize_command(cmd_raw)
-    if not cmd:
+def git_undo():
+    if not (BASE_DIR / ".git").exists():
         return
-    show_toast("VIZOR Runner", f"[{BASE_DIR.name}] Выполняется:\n{cmd}")
-    ps_wrapped = f"Continue = 'Continue'; try {{ {cmd} }} catch {{ Write-Error }}"
     try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_wrapped],
+        log = subprocess.run(
+            ["git", "log", "-1", "--pretty=%B"],
             cwd=str(BASE_DIR),
             capture_output=True,
             text=True,
             encoding="utf-8",
-            errors="replace"
-        )
-        stdout_clean = result.stdout.strip()
-        stderr_clean = result.stderr.strip()
-        has_error = (result.returncode != 0) or bool(stderr_clean) or ("Cannot find path" in stdout_clean)
-
-        if not has_error:
-            out_preview = stdout_clean[:100] if stdout_clean else "Успешно"
-            show_toast("VIZOR Runner", f"Готово: {cmd}\n{out_preview}")
-        else:
-            err_details = stderr_clean if stderr_clean else stdout_clean
-            if not err_details:
-                err_details = f"Код ошибки {result.returncode}"
-            fix_prompt = (
-                f"При выполнении команды в проекте {BASE_DIR.name}:\n{cmd}\n\n"
-                f"Возникла ошибка:\n`	ext\n{err_details}\n`\n\n"
-                f"Объясни причину и дай исправленный код или команду."
+        ).stdout.strip()
+        if log.startswith("vizor(auto):"):
+            subprocess.run(
+                ["git", "reset", "--hard", "HEAD~1"], cwd=str(BASE_DIR), check=True
             )
-            pyperclip.copy(fix_prompt)
-            show_toast("VIZOR Ошибка! Запрос в буфере", "Текст ошибки скопирован! Нажмите Ctrl+V в чате.")
+            show_toast("VIZOR Откат", "Коммит отменен")
+        else:
+            subprocess.run(["git", "restore", "."], cwd=str(BASE_DIR), check=True)
+            subprocess.run(["git", "clean", "-fd"], cwd=str(BASE_DIR), check=True)
+            show_toast("VIZOR Откат", "Файлы восстановлены")
     except Exception as e:
-        pyperclip.copy(f"Ошибка вызова: {e}")
-        show_toast("VIZOR Runner Ошибка", str(e))
+        show_toast("VIZOR Ошибка отката", str(e))
 
-def process_clipboard():
-    text = pyperclip.paste()
-    if not text.strip():
+
+def parse_with_local_llm(text, files):
+    f_str = "\n".join(files) if files else "Пусто"
+    prompt = f"""Ты — системный диспетчер VIZOR.
+Файлы проекта ({BASE_DIR.name}):
+{f_str}
+
+Инструкции:
+1. Если файл новый — обязательно создай его и укажи путь в path (например: src/calc_demo.py). Не отказывай в создании!
+2. В content передавай чистый код без markdown.
+3. В commands передавай терминальные команды запуска (если есть).
+
+JSON:
+{{"files": [{{"path": "file.ext", "content": "код"}}], "commands": []}}
+
+Текст:
+{text}"""
+    for ep in OLLAMA_ENDPOINTS:
+        try:
+            with httpx.Client(timeout=40.0) as client:
+                r = client.post(
+                    ep,
+                    json={
+                        "model": MODEL_NAME,
+                        "prompt": prompt,
+                        "stream": False,
+                        "format": "json",
+                    },
+                )
+                if r.status_code == 200:
+                    return json.loads(r.json()["response"].strip())
+        except Exception:
+            continue
+    return {"files": [], "commands": []}
+
+
+def normalize_cmd(c):
+    if isinstance(c, dict):
+        c = c.get("command") or c.get("cmd") or str(c)
+    return re.sub(
+        r"^(?:powershell|pwsh)\s+(?:-Command\s+)?", "", str(c), flags=re.I
+    ).strip()
+
+
+def exec_cmd(c_raw):
+    cmd = normalize_cmd(c_raw)
+    if not cmd:
         return
-    existing_files = get_project_files()
-    data = parse_with_local_llm(text, existing_files)
+    show_toast("VIZOR Runner", cmd)
+    try:
+        res = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            cwd=str(BASE_DIR),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if res.returncode != 0 or res.stderr.strip():
+            pyperclip.copy(
+                f"Ошибка в `{cmd}`:\n```\n{res.stderr.strip() or res.stdout.strip()}\n```"
+            )
+            show_toast("VIZOR Ошибка", "Текст ошибки в буфере")
+    except Exception as e:
+        show_toast("VIZOR Ошибка Runner", str(e))
+
+
+def apply_actions(files, commands):
+    app = []
+    for it in files:
+        rel = it["path"].lstrip("\\/").replace("/", os.sep)
+        full = (BASE_DIR / rel).resolve()
+        full.parent.mkdir(parents=True, exist_ok=True)
+        with open(full, "w", encoding="utf-8") as f:
+            f.write(it["content"].strip() + "\n")
+        app.append(rel)
+    if app:
+        git_commit_changes(app)
+        show_toast(f"VIZOR [{BASE_DIR.name}]", "\n".join(app[:3]))
+    for c in commands:
+        exec_cmd(c)
+
+
+def show_preview_overlay(files, commands):
+    root = tk.Tk()
+    root.title("VIZOR HUD")
+    root.geometry("840x580")
+    root.attributes("-topmost", True)
+    root.overrideredirect(True)
+    root.configure(bg="#2d2d2d")
+
+    # Внешняя граница окна
+    main_frame = tk.Frame(
+        root, bg="#1e1e1e", bd=1, highlightbackground="#007acc", highlightthickness=1
+    )
+    main_frame.pack(fill="both", expand=True)
+
+    # Кастомная темная шапка с возможностью перетаскивания
+    title_bar = tk.Frame(main_frame, bg="#252526", padx=12, pady=8)
+    title_bar.pack(fill="x")
+
+    def start_move(e):
+        root.x = e.x
+        root.y = e.y
+
+    def do_move(e):
+        root.geometry(
+            f"+{root.winfo_pointerx() - root.x}+{root.winfo_pointery() - root.y}"
+        )
+
+    title_bar.bind("<Button-1>", start_move)
+    title_bar.bind("<B1-Motion>", do_move)
+
+    badge = tk.Label(
+        title_bar,
+        text="⚡ VIZOR HUD",
+        font=("Segoe UI", 9, "bold"),
+        fg="#00e676",
+        bg="#1b1b1b",
+        padx=6,
+        pady=2,
+    )
+    badge.pack(side="left", padx=(0, 10))
+
+    t_lbl = tk.Label(
+        title_bar,
+        text=f"Проект: {BASE_DIR.name}  ({BASE_DIR})",
+        font=("Segoe UI", 9),
+        fg="#cccccc",
+        bg="#252526",
+    )
+    t_lbl.pack(side="left")
+    t_lbl.bind("<Button-1>", start_move)
+    t_lbl.bind("<B1-Motion>", do_move)
+
+    btn_x = tk.Label(
+        title_bar,
+        text="✕",
+        font=("Segoe UI", 10, "bold"),
+        fg="#888888",
+        bg="#252526",
+        padx=8,
+        cursor="hand2",
+    )
+    btn_x.pack(side="right")
+    btn_x.bind("<Button-1>", lambda e: root.destroy())
+
+    # Панель метаданных
+    meta_box = tk.Frame(main_frame, bg="#181818", padx=16, pady=10)
+    meta_box.pack(fill="x", padx=12, pady=(10, 4))
+
+    files_summary = ", ".join([f["path"] for f in files]) if files else "нет"
+    cmds_summary = (
+        " && ".join([normalize_cmd(c) for c in commands]) if commands else "нет"
+    )
+
+    f_row = tk.Frame(meta_box, bg="#181818")
+    f_row.pack(fill="x", pady=2)
+    tk.Label(
+        f_row,
+        text="ФАЙЛЫ:",
+        font=("Segoe UI", 8, "bold"),
+        fg="#777777",
+        bg="#181818",
+        width=10,
+        anchor="w",
+    ).pack(side="left")
+    tk.Label(
+        f_row,
+        text=files_summary,
+        font=("Consolas", 10, "bold"),
+        fg="#4ec9b0",
+        bg="#181818",
+        anchor="w",
+    ).pack(side="left")
+
+    c_row = tk.Frame(meta_box, bg="#181818")
+    c_row.pack(fill="x", pady=2)
+    tk.Label(
+        c_row,
+        text="RUNNER:",
+        font=("Segoe UI", 8, "bold"),
+        fg="#777777",
+        bg="#181818",
+        width=10,
+        anchor="w",
+    ).pack(side="left")
+    tk.Label(
+        c_row,
+        text=cmds_summary,
+        font=("Consolas", 9),
+        fg="#ce9178",
+        bg="#181818",
+        anchor="w",
+    ).pack(side="left")
+
+    # Нижняя панель действий
+    bottom_bar = tk.Frame(main_frame, bg="#252526", padx=16, pady=10)
+    bottom_bar.pack(side="bottom", fill="x")
+
+    def confirm(e=None):
+        root.destroy()
+        apply_actions(files, commands)
+
+    def cancel(e=None):
+        root.destroy()
+
+    root.bind("<Return>", confirm)
+    root.bind("<Escape>", cancel)
+
+    tk.Button(
+        bottom_bar,
+        text="Отмена (Esc)",
+        font=("Segoe UI", 9),
+        bg="#333333",
+        fg="#dddddd",
+        relief="flat",
+        padx=16,
+        pady=6,
+        cursor="hand2",
+        command=cancel,
+    ).pack(side="right", padx=6)
+    tk.Button(
+        bottom_bar,
+        text="✔ Применить (Enter)",
+        font=("Segoe UI", 9, "bold"),
+        bg="#007acc",
+        fg="#ffffff",
+        relief="flat",
+        padx=20,
+        pady=6,
+        cursor="hand2",
+        command=confirm,
+    ).pack(side="right", padx=6)
+
+    # Редактор предпросмотра
+    editor_container = tk.Frame(main_frame, bg="#181818", padx=12, pady=6)
+    editor_container.pack(side="top", fill="both", expand=True, padx=12, pady=6)
+
+    line_nums = tk.Text(
+        editor_container,
+        width=4,
+        bg="#181818",
+        fg="#555555",
+        font=("Cascadia Code", 10),
+        relief="flat",
+        wrap="none",
+        state="disabled",
+        padx=4,
+        pady=4,
+    )
+    line_nums.pack(side="left", fill="y")
+
+    preview_text = tk.Text(
+        editor_container,
+        bg="#181818",
+        fg="#d4d4d4",
+        insertbackground="#ffffff",
+        font=("Cascadia Code", 10),
+        relief="flat",
+        wrap="none",
+        padx=8,
+        pady=4,
+    )
+    preview_text.tag_configure("kw", foreground="#569cd6")
+    preview_text.tag_configure("string", foreground="#ce9178")
+    preview_text.pack(side="left", fill="both", expand=True)
+
+    raw_code = (
+        files[0].get("content", "")
+        if files
+        else ("# Команды:\n" + "\n".join([normalize_cmd(c) for c in commands]))
+    )
+    preview_text.insert("1.0", raw_code)
+
+    for kw in [
+        "def ",
+        "class ",
+        "import ",
+        "from ",
+        "return ",
+        "if ",
+        "else:",
+        "for ",
+        "while ",
+        "try:",
+        "except ",
+    ]:
+        pos = "1.0"
+        while True:
+            pos = preview_text.search(kw, pos, stopindex=tk.END)
+            if not pos:
+                break
+            end = f"{pos}+{len(kw)}c"
+            preview_text.tag_add("kw", pos, end)
+            pos = end
+
+    total_lines = int(preview_text.index("end-1c").split(".")[0])
+    line_nums.config(state="normal")
+    line_nums.delete("1.0", tk.END)
+    line_nums.insert("1.0", "\n".join(str(i) for i in range(1, total_lines + 1)))
+    line_nums.config(state="disabled")
+
+    def on_mousewheel(event):
+        preview_text.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        line_nums.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        return "break"
+
+    preview_text.bind("<MouseWheel>", on_mousewheel)
+    line_nums.bind("<MouseWheel>", on_mousewheel)
+
+    root.update_idletasks()
+    root.geometry(
+        f"840x580+{(root.winfo_screenwidth() - 840)//2}+{(root.winfo_screenheight() - 580)//2}"
+    )
+    root.mainloop()
+
+
+def process_clip():
+    txt = pyperclip.paste()
+    if not txt.strip():
+        return
+    data = parse_with_local_llm(txt, get_project_files())
     files = data.get("files", [])
     commands = data.get("commands", [])
+    if files or commands:
+        threading.Thread(
+            target=show_preview_overlay, args=(files, commands), daemon=True
+        ).start()
 
-    if not files and not commands:
-        return
-
-    applied_file_names = []
-    for item in files:
-        rel_path = item["path"].lstrip("\\/").replace("/", os.sep)
-        full_path = (BASE_DIR / rel_path).resolve()
-        is_update = full_path.exists()
-        backup_file(full_path)
-        full_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(full_path, "w", encoding="utf-8") as f:
-            f.write(item["content"].strip() + "\n")
-        applied_file_names.append(rel_path)
-
-    if applied_file_names:
-        git_commit_changes(applied_file_names)
-        show_toast(f"VIZOR [{BASE_DIR.name}]: Применено", "\n".join(applied_file_names[:3]))
-
-    for cmd_item in commands:
-        execute_command_with_feedback(cmd_item)
 
 def build_menu():
-    recent_items = []
-    for r in config.get("recent_projects", []):
-        p_name = Path(r).name or r
-        recent_items.append(
-            pystray.MenuItem(f"{p_name} ({r})", lambda _, item_path=r: set_active_project(item_path))
-        )
-
-    menu_structure = [
-        pystray.MenuItem(f"Проект: {BASE_DIR.name}", lambda: None, enabled=False),
-        pystray.MenuItem("Выбрать папку проекта...", lambda: pick_folder_dialog()),
+    rec = [
+        pystray.MenuItem(f"{Path(r).name}", lambda _, p=r: set_active_project(p))
+        for r in config.get("recent_projects", [])
     ]
-    if recent_items:
-        menu_structure.append(pystray.MenuItem("Недавние проекты", pystray.Menu(*recent_items)))
-
-    menu_structure.extend([
+    m = [
+        pystray.MenuItem(f"Проект: {BASE_DIR.name}", lambda: None, enabled=False),
+        pystray.MenuItem("Открыть в VS Code", lambda: open_in_vscode()),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Обработать буфер (Alt+V)", lambda: process_clipboard()),
-        pystray.MenuItem("Откатить действие (Alt+Z)", lambda: git_undo_last_action()),
+        pystray.MenuItem("Обработать буфер (Alt+V)", lambda: process_clip()),
+        pystray.MenuItem("Откатить действие (Alt+Z)", lambda: git_undo()),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Выход", lambda icon, item: (icon.stop(), os._exit(0)))
-    ])
-    return pystray.Menu(*menu_structure)
+        pystray.MenuItem("Выход", lambda icon, item: (icon.stop(), os._exit(0))),
+    ]
+    return pystray.Menu(*m)
 
-def create_tray_icon():
+
+def create_tray():
     global tray_icon_ref
-    image = Image.new('RGB', (64, 64), color=(25, 25, 25))
-    d = ImageDraw.Draw(image)
+    img = Image.new("RGB", (64, 64), (25, 25, 25))
+    d = ImageDraw.Draw(img)
     d.rectangle([16, 16, 48, 48], fill=(0, 200, 100))
     d.polygon([(32, 20), (20, 44), (44, 44)], fill=(255, 255, 255))
-
-    tray_icon_ref = pystray.Icon("VIZOR", image, "VIZOR Agent", build_menu())
+    tray_icon_ref = pystray.Icon("VIZOR", img, "VIZOR HUD", build_menu())
     return tray_icon_ref
 
+
 if __name__ == "__main__":
-    keyboard.add_hotkey('alt+v', process_clipboard)
-    keyboard.add_hotkey('alt+z', git_undo_last_action)
-    show_toast("VIZOR Запущен", f"Проект: {BASE_DIR.name}\nAlt+V: Захват | Alt+Z: Undo")
-    icon = create_tray_icon()
-    icon.run()
+    keyboard.add_hotkey("alt+v", process_clip)
+    keyboard.add_hotkey("alt+z", git_undo)
+    print(f"[VIZOR HUD] Запущен. Проект: {BASE_DIR.name}")
+    print(f"[VIZOR HUD] Alt+V: оверлей | Alt+Z: откат")
+    create_tray().run()
