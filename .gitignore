@@ -20,3 +20,5 @@ tmp/
 temp/
 .vscode/*
 !.vscode/settings.json
+
+.vizor_history/
